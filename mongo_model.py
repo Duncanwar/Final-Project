@@ -13,7 +13,7 @@
 #   - ISO timestamp strings are converted to real dates so time-based queries work.
 #
 # Usage:
-#   pip install pymongo  
+#   pip install pymongo
 #   python mongo_model.py            # create collections + indexes, load all JSON files
 import glob
 import json
@@ -29,9 +29,10 @@ BATCH_SIZE = 10000
 SCHEMAS = {
     "categories": {
         "bsonType": "object",
-        "required": ["_id", "name", "subcategories"],
+        "required": ["_id", "category_id", "name", "subcategories"],
         "properties": {
             "_id": {"bsonType": "string"},
+            "category_id": {"bsonType": "string"},
             "name": {"bsonType": "string"},
             "subcategories": {
                 "bsonType": "array",
@@ -49,9 +50,10 @@ SCHEMAS = {
     },
     "products": {
         "bsonType": "object",
-        "required": ["_id", "name", "category_id", "base_price", "current_stock", "is_active"],
+        "required": ["_id","product_id", "name", "category_id", "base_price", "current_stock", "is_active"],
         "properties": {
             "_id": {"bsonType": "string"},
+            "product_id": {"bsonType": "string"},
             "name": {"bsonType": "string"},
             "category_id": {"bsonType": "string"},
             "base_price": {"bsonType": "double"},
@@ -73,9 +75,10 @@ SCHEMAS = {
     },
     "users": {
         "bsonType": "object",
-        "required": ["_id", "geo_data", "registration_date"],
+        "required": ["_id", "user_id", "geo_data", "registration_date"],
         "properties": {
             "_id": {"bsonType": "string"},
+            "user_id": {"bsonType": "string"},
             "geo_data": {
                 "bsonType": "object",
                 "properties": {
@@ -192,7 +195,7 @@ def to_date(value):
 
 def prepare(collection, doc):
     """Turn a raw JSON record into a MongoDB document."""
-    doc["_id"] = doc.pop(ID_FIELDS[collection])
+    doc["_id"] = doc[ID_FIELDS[collection]]
     for field in DATE_FIELDS.get(collection, []):
         if field in doc:
             doc[field] = to_date(doc[field])
