@@ -1,0 +1,19 @@
+services:
+  hbase:
+    build: .
+    image: local/hbase:2.5.10
+    container_name: hbase
+    hostname: hbase
+    ports:
+      - "16010:16010"   # Master UI
+      - "9090:9090"     # Thrift (happybase)
+      - "8080:8080"     # REST
+      - "2181:2181"     # ZooKeeper
+    volumes:
+      - hbase-data:/data
+    environment:
+      - HBASE_HEAPSIZE=2G
+    restart: unless-stopped
+
+volumes:
+  hbase-data:

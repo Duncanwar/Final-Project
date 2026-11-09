@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<configuration>
+  <!-- Standalone mode: Master, RegionServer and ZooKeeper in one JVM -->
+  <property><name>hbase.cluster.distributed</name><value>false</value></property>
+  <!-- Data lives on the mounted /data volume so it survives container restarts -->
+  <property><name>hbase.rootdir</name><value>file:///data/hbase</value></property>
+  <property><name>hbase.zookeeper.property.dataDir</name><value>/data/zookeeper</value></property>
+  <!-- Required when writing to a local filesystem instead of HDFS -->
+  <property><name>hbase.unsafe.stream.capability.enforce</name><value>false</value></property>
+</configuration>
