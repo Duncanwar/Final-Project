@@ -47,7 +47,6 @@ dataset_generator.py ──> raw JSON files (users, products, categories, transa
 | `visualizations.py` | Draws the four report charts into `figures/` | Part 4 |
 | `figures/` | The four charts (PNG) | Part 4 |
 
-`run_script.py` and `models/` are leftovers and are not used.
 Generated data (`*.json`, `jsonl/`, `parquet/`) is git-ignored because it is several GB.
 
 ## Requirements
