@@ -3,3 +3,7 @@
 *.jsonl
 jsonl/
 parquet/
+
+# Python / Jupyter caches
+__pycache__/
+.ipynb_checkpoints/

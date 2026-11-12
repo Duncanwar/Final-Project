@@ -32,8 +32,8 @@ pipeline =[
     {"$limit": TOP_N}
 ]
 
- #for row in db.sessions.aggregate(pipeline):
-  #  print(row)
+for row in db.sessions.aggregate(pipeline):
+    print(row)
     
 pipeline2 = [
     {"$match": {"status":"completed"}},
