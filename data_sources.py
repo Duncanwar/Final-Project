@@ -61,9 +61,13 @@ def _mongo_db():
     return client[MONGO_DB]
 
 
+# MongoDB documents have an ObjectId as _id. Spark has no ObjectId type, so it is kept as
+# its 24-character hex string in a "mongo_id" column. Joins use the natural ids
+# (user_id, transaction_id, ...), which are the same in MongoDB, HBase and the Parquet files.
 USERS_SCHEMA = StructType([
-    StructField("user_id", StringType()), StructField("city", StringType()),
-    StructField("state", StringType()), StructField("country", StringType()),
+    StructField("mongo_id", StringType()), StructField("user_id", StringType()),
+    StructField("city", StringType()), StructField("state", StringType()),
+    StructField("country", StringType()),
     StructField("registration_date", TimestampType()), StructField("last_active", TimestampType()),
 ])
 
@@ -71,17 +75,21 @@ USERS_SCHEMA = StructType([
 def mongo_users(spark):
     try:
         db = _mongo_db()
-        rows = [(d["_id"], d["geo_data"].get("city"), d["geo_data"].get("state"),
+        projection = {"user_id": 1, "geo_data": 1, "registration_date": 1, "last_active": 1}
+        rows = [(str(d["_id"]), d["user_id"], d["geo_data"].get("city"), d["geo_data"].get("state"),
                  d["geo_data"].get("country"), d["registration_date"], d.get("last_active"))
-                for d in db.users.find({}, {"geo_data": 1, "registration_date": 1, "last_active": 1})]
+                for d in db.users.find({}, projection)]
         print(f"  users            <- MongoDB ({len(rows):,} documents)")
         return spark.createDataFrame(rows, USERS_SCHEMA)
     except Exception as e:
         print(f"  users            <- curated Parquet (MongoDB unavailable: {type(e).__name__})")
-        return spark.read.parquet(f"{CURATED_PATH}/users")
+        return (spark.read.parquet(f"{CURATED_PATH}/users")
+                .withColumn("mongo_id", F.lit(None).cast("string"))
+                .select(*[f.name for f in USERS_SCHEMA]))
 
 
 TXN_SAMPLE_SCHEMA = StructType([
+    StructField("mongo_id", StringType()),
     StructField("transaction_id", StringType()), StructField("user_id", StringType()),
     StructField("session_id", StringType()), StructField("timestamp", TimestampType()),
     StructField("total", DoubleType()), StructField("item_count", IntegerType()),
@@ -95,11 +103,12 @@ def mongo_transactions_sample(spark, size=50_000):
         db = _mongo_db()
         pipeline = [
             {"$sample": {"size": size}},
-            {"$project": {"user_id": 1, "session_id": 1, "timestamp": 1, "total": 1,
-                          "item_count": {"$size": "$items"}, "payment_method": 1, "status": 1}},
+            {"$project": {"transaction_id": 1, "user_id": 1, "session_id": 1, "timestamp": 1,
+                          "total": 1, "item_count": {"$size": "$items"},
+                          "payment_method": 1, "status": 1}},
         ]
-        rows = [(d["_id"], d["user_id"], d.get("session_id"), d["timestamp"], float(d["total"]),
-                 d["item_count"], d["payment_method"], d["status"])
+        rows = [(str(d["_id"]), d["transaction_id"], d["user_id"], d.get("session_id"),
+                 d["timestamp"], float(d["total"]), d["item_count"], d["payment_method"], d["status"])
                 for d in db.transactions.aggregate(pipeline, allowDiskUse=True)]
         print(f"  transactions     <- MongoDB ($sample of {len(rows):,})")
         return spark.createDataFrame(rows, TXN_SAMPLE_SCHEMA)
@@ -107,6 +116,7 @@ def mongo_transactions_sample(spark, size=50_000):
         print(f"  transactions     <- curated Parquet sample (MongoDB unavailable: {type(e).__name__})")
         txns = spark.read.parquet(f"{CURATED_PATH}/transactions")
         return (txns.sample(fraction=size / 500_000, seed=HBASE_SAMPLE_SEED)
+                .withColumn("mongo_id", F.lit(None).cast("string"))
                 .select(*[f.name for f in TXN_SAMPLE_SCHEMA]))
 
 

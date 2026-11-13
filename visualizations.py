@@ -1,11 +1,12 @@
 # visualizations.py
 # Charts for the report, drawn from the result tables written by
-# spark_sql_analytics.py and integrated_clv.py (./parquet/analytics/*).
+# dataframe.py, spark_sql_analytics.py and integrated_clv.py (./parquet/analytics/*).
 #
 #   figures/1_sales_over_time.png       daily revenue + 7-day average
 #   figures/2_revenue_by_category.png   revenue per category
 #   figures/3_views_vs_sales.png        most viewed vs top-selling products
 #   figures/4_customer_segments.png     CLV segments: value vs engagement
+#   figures/5_cohort_spending.png       spend per user by registration cohort and month
 #
 # Usage:
 #   python visualizations.py
@@ -13,6 +14,7 @@ import os
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.colors as mcolors
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -159,9 +161,40 @@ def customer_segments():
     finish(fig, "4_customer_segments.png")
 
 
+def cohort_spending():
+    """Spend per registered user per day, one line per registration cohort (dataframe.py).
+    Per day, so the 29 days of data in August compare fairly with 30-31 in Sep/Oct."""
+    c = pd.read_parquet("./parquet/analytics/user_cohorts").sort_values(["cohort", "order_month"])
+    cohorts = sorted(c["cohort"].unique())
+    # one hue, light (oldest cohort) -> dark (newest): the order of cohorts shows in the shade
+    shades = mcolors.LinearSegmentedColormap.from_list("blues", ["#86b6ef", "#2a78d6", "#184f95"])
+    months = sorted(c["order_month"].unique())
+    x = {m: i for i, m in enumerate(months)}
+
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+    for k, cohort in enumerate(cohorts):
+        g = c[c["cohort"] == cohort]
+        ax.plot([x[m] for m in g["order_month"]], g["revenue_per_user_per_day"], marker="o",
+                markersize=5, linewidth=1.8, color=shades(k / max(len(cohorts) - 1, 1)),
+                label=f"{pd.Period(cohort).strftime('%b %Y')} (n={int(g['cohort_size'].iloc[0]):,})")
+    ax.set_xticks(range(len(months)), [pd.Period(m).strftime("%b %Y") for m in months])
+    ax.set_ylim(0, c["revenue_per_user_per_day"].max() * 1.25)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
+    ax.set_ylabel("Spend per registered user per day")
+    ax.grid(axis="x", visible=False)
+    ax.legend(title="Registration cohort", frameon=False, ncol=4, loc="lower center",
+              fontsize=8.5, title_fontsize=9, labelcolor=TEXT_2)
+    low, high = c["revenue_per_user_per_day"].min(), c["revenue_per_user_per_day"].max()
+    ax.set_title("Every cohort spends the same, whatever its registration month", pad=22)
+    subtitle(ax, f"Spend per user per day ranges only ${low:,.0f}-${high:,.0f} across "
+                 f"{len(cohorts)} cohorts; {c['active_pct'].min():.0f}% of every cohort bought every month")
+    finish(fig, "5_cohort_spending.png")
+
+
 if __name__ == "__main__":
     os.makedirs(FIGURES_PATH, exist_ok=True)
     sales_over_time()
     revenue_by_category()
     views_vs_sales()
     customer_segments()
+    cohort_spending()
