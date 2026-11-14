@@ -1,6 +1,7 @@
 # dataframe.py
-# Spark batch job: clean + normalize the raw e-commerce dataset, then compute
-# "customers who bought X also bought Y" recommendation indicators.
+# Spark batch job: clean + normalize the raw e-commerce dataset, then run a cohort
+# analysis of user purchasing patterns (users grouped by registration month, spending
+# followed month by month).
 #
 # Input:
 #   ./jsonl/*.jsonl          users, products, categories, transactions, sessions (JSON Lines)
@@ -8,22 +9,21 @@
 # Output (Parquet, overwritten on every run):
 #   ./parquet/curated/{users,products,categories,subcategories,transactions,
 #                      transaction_items,sessions}
-#   ./parquet/recommendations/also_bought
+#   ./parquet/analytics/user_cohorts
 #
 # Usage:
 #   python dataframe.py
 import os
 
-from pyspark.sql import SparkSession, Window
+from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 RAW_PATH = "./jsonl"
 SESSIONS_RAW_PATH = "./parquet/sessions"
 CURATED_PATH = "./parquet/curated"
-RECOMMENDATIONS_PATH = "./parquet/recommendations/also_bought"
+COHORTS_PATH = "./parquet/analytics/user_cohorts"
 
-MIN_PAIR_COUNT = 2      # a pair must appear in at least this many orders
-TOP_K = 5               # recommendations kept per product
+MIN_DAYS_PER_MONTH = 28   # order months with fewer days of data are partial and left out
 
 
 def report(name, raw_count, df):
@@ -79,7 +79,7 @@ def clean_products(raw):
                 F.to_timestamp("creation_date").alias("creation_date"),
                 F.array_sort(F.coalesce(history, F.array())).alias("price_history"))
             .filter(F.col("base_price") > 0)
-            .withColumn("price_changes", F.greatest(F.size("price_history") - 1, F.lit(0)))
+            .withColumn("price_changes"   , F.greatest(F.size("price_history") - 1, F.lit(0)))
             .withColumn("first_price", F.coalesce(F.element_at("price_history", 1)["price"], F.col("base_price"))))
 
 
@@ -171,53 +171,53 @@ def clean_sessions(raw):
             .withColumn("date", F.to_date("start_time")))
 
 
-# --- Recommendations: customers who bought X also bought Y ---
-def also_bought(items, products):
-    baskets = items.select("transaction_id", "product_id").distinct()
-    n_orders = baskets.select("transaction_id").distinct().count()
+# --- Cohort analysis: users grouped by registration month ---
+def cohort_analysis(users, transactions):
+    """One row per (registration cohort, order month): how many of the cohort bought,
+    and how much the cohort spent, relative to the cohort's size."""
+    cohorts = users.select("user_id", F.date_trunc("month", "registration_date").alias("cohort_month"))
+    cohort_size = cohorts.groupBy("cohort_month").agg(F.count("*").alias("cohort_size"))
 
-    product_orders = baskets.groupBy("product_id").agg(F.count("*").alias("orders"))
+    orders = transactions.select("user_id", "total", "date",
+                                 F.date_trunc("month", "timestamp").alias("order_month"))
 
-    # Every unordered pair of different products in the same order
-    a, b = baskets.alias("a"), baskets.alias("b")
-    pairs = (a.join(b, (F.col("a.transaction_id") == F.col("b.transaction_id"))
-                    & (F.col("a.product_id") < F.col("b.product_id")))
-             .groupBy(F.col("a.product_id").alias("p1"), F.col("b.product_id").alias("p2"))
-             .agg(F.count("*").alias("pair_orders"))
-             .filter(F.col("pair_orders") >= MIN_PAIR_COUNT))
+    # The data window starts and ends mid-month; keep only (nearly) complete order months
+    # so the months can be compared fairly
+    full_months = (orders.groupBy("order_month")
+                   .agg(F.countDistinct("date").alias("days"))
+                   .filter(F.col("days") >= MIN_DAYS_PER_MONTH))
 
-    # Both directions: X -> Y and Y -> X
-    rules = (pairs.select(F.col("p1").alias("product_id"), F.col("p2").alias("also_bought_id"), "pair_orders")
-             .unionByName(pairs.select(F.col("p2").alias("product_id"), F.col("p1").alias("also_bought_id"), "pair_orders")))
+    activity = (orders.join(full_months, "order_month")
+                .join(cohorts, "user_id")
+                .groupBy("cohort_month", "order_month", "days")
+                .agg(F.countDistinct("user_id").alias("active_customers"),
+                     F.count("*").alias("orders"),
+                     F.sum("total").alias("revenue")))
 
-    x = product_orders.select(F.col("product_id"), F.col("orders").alias("x_orders"))
-    y = product_orders.select(F.col("product_id").alias("also_bought_id"), F.col("orders").alias("y_orders"))
-    rules = (rules.join(x, "product_id").join(y, "also_bought_id")
-             # support    = share of all orders containing both X and Y
-             # confidence = P(Y in order | X in order)
-             # lift       = confidence / P(Y); > 1 means bought together more than by chance
-             .withColumn("support", F.col("pair_orders") / F.lit(n_orders))
-             .withColumn("confidence", F.col("pair_orders") / F.col("x_orders"))
-             .withColumn("lift", F.col("confidence") / (F.col("y_orders") / F.lit(n_orders))))
-
-    rank = Window.partitionBy("product_id").orderBy(F.desc("confidence"), F.desc("lift"), "also_bought_id")
-    names = products.select("product_id", "name")
-    return (rules
-            .withColumn("rank", F.row_number().over(rank))
-            .filter(F.col("rank") <= TOP_K)
-            .join(names, "product_id")
-            .join(names.select(F.col("product_id").alias("also_bought_id"), F.col("name").alias("also_bought_name")),
-                  "also_bought_id")
-            .select("product_id", "name", "rank", "also_bought_id", "also_bought_name",
-                    "pair_orders", "x_orders", "y_orders",
-                    F.round("support", 6).alias("support"),
-                    F.round("confidence", 4).alias("confidence"),
-                    F.round("lift", 2).alias("lift")))
+    return (activity.join(cohort_size, "cohort_month")
+            .select(
+                F.date_format("cohort_month", "yyyy-MM").alias("cohort"),
+                F.date_format("order_month", "yyyy-MM").alias("order_month"),
+                F.months_between("order_month", "cohort_month").cast("int").alias("months_since_registration"),
+                "cohort_size",
+                "active_customers",
+                "orders",
+                F.round("revenue", 2).alias("revenue"),
+                # share of the cohort that bought at least once in that month
+                F.round(100 * F.col("active_customers") / F.col("cohort_size"), 1).alias("active_pct"),
+                # spend per registered user, so cohorts of different sizes compare fairly
+                F.round(F.col("revenue") / F.col("cohort_size"), 2).alias("revenue_per_user"),
+                # per day of data, so a 29-day month compares fairly with a 31-day month
+                F.col("days").alias("days_of_data"),
+                F.round(F.col("revenue") / F.col("cohort_size") / F.col("days"), 2).alias("revenue_per_user_per_day"),
+                F.round(F.col("orders") / F.col("cohort_size"), 2).alias("orders_per_user"),
+                F.round(F.col("revenue") / F.col("orders"), 2).alias("avg_order_value"))
+            .orderBy("cohort", "order_month"))
 
 
 if __name__ == "__main__":
     spark = (SparkSession.builder
-             .appName("CleanAndRecommend")
+             .appName("CleanAndCohorts")
              .master("local[3]")
              .config("spark.hadoop.fs.defaultFS", "file:///")
              .config("spark.driver.memory", "4g")
@@ -262,16 +262,25 @@ if __name__ == "__main__":
     print("\nTransactions without a session:", txns.filter(~F.col("has_session")).count())
     print("Transactions with total mismatch:", txns.filter("total_mismatch").count())
 
-    print("\n=== Recommendations: customers who bought X also bought Y ===")
-    recs = also_bought(curated["transaction_items"], curated["products"])
-    recs.write.mode("overwrite").parquet(RECOMMENDATIONS_PATH)
-    recs = spark.read.parquet(RECOMMENDATIONS_PATH)
+    print("\n=== Cohort analysis: users by registration month ===")
+    cohorts = cohort_analysis(curated["users"], curated["transactions"])
+    cohorts.coalesce(1).write.mode("overwrite").parquet(COHORTS_PATH)
+    cohorts = spark.read.parquet(COHORTS_PATH).orderBy("cohort", "order_month")
+    cohorts.show(50, truncate=False)
 
-    print(f"{recs.count():,} recommendations for {recs.select('product_id').distinct().count():,} products")
-    print("\nStrongest associations overall (by lift, at least 3 shared orders):")
-    recs.filter("pair_orders >= 3").orderBy(F.desc("lift")).show(10, truncate=30)
-    example = recs.orderBy(F.desc("x_orders")).first()["product_id"]
-    print(f"Example - customers who bought {example} also bought:")
-    recs.filter(F.col("product_id") == example).orderBy("rank").show(truncate=40)
+    for metric, title in [("active_pct", "Share of each cohort that bought in the month (%)"),
+                          ("revenue_per_user", "Spend per registered user in the month ($)"),
+                          ("revenue_per_user_per_day", "Spend per registered user per day of data ($)")]:
+        print(title)
+        (cohorts.groupBy("cohort", "cohort_size").pivot("order_month").agg(F.first(metric))
+         .orderBy("cohort").show(truncate=False))
+
+    print("Whole window, per cohort:")
+    (cohorts.groupBy("cohort", "cohort_size")
+     .agg(F.sum("revenue").alias("revenue"), F.sum("orders").alias("orders"))
+     .select("cohort", "cohort_size",
+             F.round(F.col("revenue") / F.col("cohort_size"), 2).alias("revenue_per_user"),
+             F.round(F.col("orders") / F.col("cohort_size"), 2).alias("orders_per_user"))
+     .orderBy("cohort").show(truncate=False))
 
     spark.stop()
