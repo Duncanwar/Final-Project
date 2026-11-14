@@ -7,7 +7,7 @@ data (2.5 million records) with three technologies, each used for what it does b
 | --- | --- |
 | **MongoDB** (document store) | Holds all data as documents: products, users, categories, transactions (with embedded line items) and sessions (with embedded page views). Each document gets an `ObjectId` as `_id`; the natural ids (`user_id`, `product_id`, ...) have unique indexes. Runs the aggregation pipelines. |
 | **HBase** (wide-column store, in Docker) | Holds a 10% sample of sessions, keyed so a user's sessions can be read newest first, plus daily metrics per product. |
-| **Apache Spark** (PySpark) | Cleans the data, runs a cohort analysis of user spending by registration month, runs Spark SQL analytics, and joins MongoDB + HBase data for the customer lifetime value (CLV) analysis. |
+| **Apache Spark** (PySpark) | Cleans the data, runs a cohort analysis of user spending by registration month, runs Spark SQL analytics, and joins MongoDB purchases with HBase product views to recommend products. |
 
 The technical report (`Final_Report.docx` / PDF) explains the design and the results.
 
@@ -25,7 +25,7 @@ dataset_generator.py ──> raw JSON files (users, products, categories, transa
                                                           parquet/analytics/user_cohorts
                                             │
               MongoDB + HBase + curated ──> spark_sql_analytics.py ──> parquet/analytics/
-                                            integrated_clv.py ─────> parquet/analytics/
+                                            integrated_recommendations.py ─> parquet/analytics/
                                                                          │
                                                 visualizations.py ──> figures/*.png
 ```
@@ -43,9 +43,9 @@ dataset_generator.py ──> raw JSON files (users, products, categories, transa
 | `dataframe.py` | Spark batch job: cleans and normalizes all data, then a cohort analysis (users grouped by registration month, spending followed month by month) | Part 2 |
 | `data_sources.py` | Shared helpers: Spark session, and loaders that read MongoDB and HBase into Spark DataFrames (the MongoDB `ObjectId` is kept as a `mongo_id` string column) | Parts 2–3 |
 | `spark_sql_analytics.py` | Spark SQL queries on the cleaned data (Part A) and on data loaded from MongoDB/HBase (Part B) | Part 2 |
-| `integrated_clv.py` | Integrated query: customer lifetime value from MongoDB users/orders + HBase sessions | Part 3 |
-| `visualizations.py` | Draws the five charts into `figures/` | Part 4 |
-| `figures/` | The five charts (PNG) | Part 4 |
+| `integrated_recommendations.py` | Integrated query: product recommendations from products bought together (MongoDB transactions) and viewed together (HBase page views) | Part 3 |
+| `visualizations.py` | Draws the six charts into `figures/` | Part 4 |
+| `figures/` | The six charts (PNG) | Part 4 |
 
 `run_script.py` and `models/` are leftovers and are not used.
 Generated data (`*.json`, `jsonl/`, `parquet/`) is git-ignored because it is several GB.
@@ -81,8 +81,8 @@ All commands run from the project folder with the virtual environment active.
 | 6. Convert for Spark | `python convert_to_jsonl.py` | ~5 min | `jsonl/*.jsonl` |
 | 7. Clean + cohorts | `python dataframe.py` | ~5 min first run | `parquet/curated/*`, `parquet/analytics/user_cohorts` (7 cohorts × 3 months), cohort tables printed |
 | 8. Spark SQL | `python spark_sql_analytics.py` | ~1 min | Query results printed and saved to `parquet/analytics/` |
-| 9. CLV | `python integrated_clv.py` | ~1 min | CLV per customer and per segment, saved to `parquet/analytics/` |
-| 10. Charts | `python visualizations.py` | seconds | `figures/1_sales_over_time.png` … `figures/5_cohort_spending.png` |
+| 9. Recommendations | `python integrated_recommendations.py` | ~1–2 min | Top 5 suggestions per product (20,557 for 4,445 products), saved to `parquet/analytics/product_affinity` |
+| 10. Charts | `python visualizations.py` | seconds | `figures/sales over time.png` … `figures/basket size.png` |
 
 Steps 8 and 9 read live from MongoDB and HBase. If either store is not running, they
 print a message and use the cleaned Parquet copy instead, so they still finish.
@@ -123,7 +123,8 @@ scan 'product_metrics', {STARTROW => 'prod_00042#20260901', STOPROW => 'prod_000
 - Product views and sales are strongly linked (**r = 0.91**), yet **none** of the 10 most viewed products is among the 10 best sellers.
 - Session conversion is **~20%** on every device and traffic source.
 - Cohorts behave alike: **every user bought in every month**, and spend per user per day stays between **$493 and $523** whatever the registration month (February to August 2026).
-- Platinum customers are worth **1.6×** Bronze customers ($171,639 vs $110,475 predicted CLV). Value is driven by **order frequency (r = 0.82)**, not browsing (r = 0.06).
+- Recommendations: **20,557** suggestions for **4,445** products; 38% rest on purchases, 56% on views and 6% on both signals.
+- Orders with 2+ items are **61%** of orders but **80%** of revenue; orders arrive evenly across weekdays and hours.
 
 ## Troubleshooting
 
